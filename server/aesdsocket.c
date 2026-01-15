@@ -43,12 +43,16 @@ int server_fd = -1;
 /*
  * Signal handler for SIGINT (Ctrl+C) and SIGTERM (kill)
  * AXIOM: Signal handler must be async-signal-safe
- * - Only uses: write to volatile variable
- * - Does NOT: malloc, printf, syslog (not safe)
+ * - Sets shutdown flag and closes server socket to interrupt accept()
  */
 void signal_handler(int sig) {
   (void)sig; /* Suppress unused warning */
   shutdown_requested = 1;
+  /* Close server socket to interrupt accept() call */
+  if (server_fd != -1) {
+    close(server_fd);
+    server_fd = -1;
+  }
 }
 
 int main(int argc, char *argv[]) {
@@ -69,6 +73,9 @@ int main(int argc, char *argv[]) {
 
   /* Open syslog with: facility=LOG_USER, options=LOG_PID|LOG_PERROR */
   openlog("aesdsocket", LOG_PID | LOG_PERROR, LOG_USER);
+
+  /* Clean up any existing data file to ensure fresh start */
+  remove(DATA_FILE);
 
   /* ================================================================
    * TODO BLOCK 1: SOCKET CREATION
@@ -158,7 +165,10 @@ int main(int argc, char *argv[]) {
     }
     /* Child continues */
     setsid();
-    chdir("/");
+    if (chdir("/") == -1) {
+      syslog(LOG_ERR, "chdir() failed: %s", strerror(errno));
+      exit(1);
+    }
     /* Redirect stdin/stdout/stderr to /dev/null */
     int null_fd = open("/dev/null", O_RDWR);
     if (null_fd != -1) {
@@ -201,6 +211,9 @@ int main(int argc, char *argv[]) {
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
 
+  /* Ignore SIGPIPE to prevent crashes when clients disconnect */
+  signal(SIGPIPE, SIG_IGN);
+
   /* ================================================================
    * MAIN LOOP: Accept connections until shutdown
    * ================================================================
@@ -213,8 +226,11 @@ int main(int argc, char *argv[]) {
     client_fd =
         accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
     if (client_fd == -1) {
-      if (errno == EINTR && shutdown_requested) {
+      if (errno == EINTR) {
         break; /* Signal received, exit loop */
+      }
+      if (shutdown_requested) {
+        break; /* Shutdown requested, exit loop */
       }
       syslog(LOG_ERR, "accept() failed: %s", strerror(errno));
       continue;
@@ -223,6 +239,12 @@ int main(int argc, char *argv[]) {
     /* Convert binary IP to string for logging */
     inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
     syslog(LOG_INFO, "Accepted connection from %s", client_ip);
+
+    /* Check for shutdown before processing client */
+    if (shutdown_requested) {
+      close(client_fd);
+      break;
+    }
 
     /* ============================================================
      * TODO BLOCK 7: RECEIVE DATA & WRITE TO FILE
@@ -273,7 +295,9 @@ int main(int argc, char *argv[]) {
         if (file_fd == -1) {
           syslog(LOG_ERR, "open() failed: %s", strerror(errno));
         } else {
-          write(file_fd, recv_buffer, packet_len);
+          if (write(file_fd, recv_buffer, packet_len) == -1) {
+            syslog(LOG_ERR, "write() failed: %s", strerror(errno));
+          }
 
           /* Seek to beginning and send entire file to client */
           lseek(file_fd, 0, SEEK_SET);
@@ -315,7 +339,9 @@ int main(int argc, char *argv[]) {
    * ================================================================
    */
   syslog(LOG_INFO, "Caught signal, exiting");
-  close(server_fd);
+  if (server_fd != -1) {
+    close(server_fd);
+  }
   remove(DATA_FILE);
   closelog();
 
