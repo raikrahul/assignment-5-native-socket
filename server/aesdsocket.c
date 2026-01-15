@@ -267,32 +267,16 @@ int main(int argc, char *argv[]) {
       while ((newline_pos = strchr(recv_buffer, '\n')) != NULL) {
         size_t packet_len = newline_pos - recv_buffer + 1; /* Include '\n' */
 
-        /* Write packet to file */
-        int file_fd = open(DATA_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        /* Write packet to file - open with O_RDWR to read back without
+         * reopening */
+        int file_fd = open(DATA_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
         if (file_fd == -1) {
           syslog(LOG_ERR, "open() failed: %s", strerror(errno));
         } else {
           write(file_fd, recv_buffer, packet_len);
-          close(file_fd);
-        }
 
-        /* ========================================================
-         * TODO BLOCK 8: SEND FILE CONTENTS BACK TO CLIENT
-         * ========================================================
-         * AXIOM: Cannot fit entire file in RAM (constraint from assignment)
-         * - Must read in chunks and send
-         * - open(DATA_FILE, O_RDONLY)
-         * - Loop: read() -> send()
-         *
-         * REAL DATA EXAMPLE:
-         * - File contains: "Hello\nWorld\n" (12 bytes)
-         * - read() returns 12 bytes
-         * - send(client_fd, buffer, 12, 0) sends all 12 bytes
-         *
-         * YOUR CODE HERE:
-         */
-        file_fd = open(DATA_FILE, O_RDONLY);
-        if (file_fd != -1) {
+          /* Seek to beginning and send entire file to client */
+          lseek(file_fd, 0, SEEK_SET);
           char send_buffer[BUFFER_SIZE];
           ssize_t bytes_read;
           while ((bytes_read =
